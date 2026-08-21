@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+#MISE description="Live integration tests for the KMIP 2.1 Go client against ghcr.io/cosmian/kms:5.26.0"
+#USAGE flag "--mtls" env="KMS_MTLS" help="Use mTLS (kms-mtls service, cert_auth)" default="false"
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+GO=$(command -v go)
+CERTS_DIR="${REPO_ROOT}/test_data/spire/certs"
+
+require_cmd() { command -v "$1" >/dev/null 2>&1 || { echo "[ERROR] '$1' not found. $2"; exit 1; }; }
+require_cmd docker "Install Docker Desktop."
+require_cmd go    "Install Go: brew install go"
+
+print_header() { echo ""; echo "════════════════════════════════════════════"; echo "  $1"; echo "════════════════════════════════════════════"; }
+print_info()    { echo "[i] $1"; }
+print_success() { echo "[OK] $1"; }
+print_error()   { echo "[ERR] $1" >&2; exit 1; }
+
+USE_MTLS="${KMS_MTLS:-false}"
+if [[ "${USE_MTLS}" == "true" ]]; then
+  KMS_SERVICE="kms-mtls"
+  KMS_SCHEME="https"
+  print_header "KMIP 2.1 Go client — live integration tests (mTLS, ghcr.io/cosmian/kms:5.26.0)"
+else
+  KMS_SERVICE="kms"
+  KMS_SCHEME="http"
+  print_header "KMIP 2.1 Go client — live integration tests (no-auth, ghcr.io/cosmian/kms:5.26.0)"
+fi
+
+cleanup() {
+  set +e
+  docker compose -f "${REPO_ROOT}/docker-compose.yml" stop "${KMS_SERVICE}" 2>/dev/null || true
+  docker compose -f "${REPO_ROOT}/docker-compose.yml" rm -f "${KMS_SERVICE}" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+# ── Pull + start KMS ──────────────────────────────────────────────────────────
+print_info "Pulling KMS image..."
+docker compose -f "${REPO_ROOT}/docker-compose.yml" pull "${KMS_SERVICE}" 2>&1 | tail -2
+
+print_info "Starting KMS container (service: ${KMS_SERVICE})..."
+docker compose -f "${REPO_ROOT}/docker-compose.yml" up -d "${KMS_SERVICE}"
+
+# ── Wait for KMS readiness ────────────────────────────────────────────────────
+KMS_PORT=$(docker compose -f "${REPO_ROOT}/docker-compose.yml" port "${KMS_SERVICE}" 9998 2>/dev/null | cut -d: -f2 || echo "9998")
+KMS_URL="${KMS_SCHEME}://127.0.0.1:${KMS_PORT}"
+
+print_info "Waiting for KMS at ${KMS_URL}..."
+TRIES=0
+until curl -sf \
+  ${USE_MTLS:+--cacert "${CERTS_DIR}/ca.crt"} \
+  ${USE_MTLS:+--cert "${CERTS_DIR}/spire-client.crt"} \
+  ${USE_MTLS:+--key  "${CERTS_DIR}/spire-client.key"} \
+  "${KMS_URL}/version" >/dev/null 2>&1; do
+  TRIES=$((TRIES + 1))
+  if [[ "${TRIES}" -ge 60 ]]; then
+    docker compose -f "${REPO_ROOT}/docker-compose.yml" logs "${KMS_SERVICE}" | tail -10
+    print_error "KMS container did not become ready after 60s"
+  fi
+  sleep 1
+done
+print_success "KMS ready at ${KMS_URL}"
+
+# ── Run Go integration tests ──────────────────────────────────────────────────
+print_info "Running Go integration tests..."
+(
+  cd "${REPO_ROOT}"
+  if [[ "${USE_MTLS}" == "true" ]]; then
+    KMS_TEST_ADDR="${KMS_URL}" \
+    KMS_CA_CERT="${CERTS_DIR}/ca.crt" \
+    KMS_CLIENT_CERT="${CERTS_DIR}/spire-client.crt" \
+    KMS_CLIENT_KEY="${CERTS_DIR}/spire-client.key" \
+      "${GO}" test -v -count=1 -tags integration ./... 2>&1
+  else
+    KMS_TEST_ADDR="${KMS_URL}" \
+      "${GO}" test -v -count=1 -tags integration ./... 2>&1
+  fi
+)
+
+print_success "KMIP 2.1 Go client live integration tests passed."
