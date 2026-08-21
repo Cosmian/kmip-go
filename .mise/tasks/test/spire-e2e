@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+#MISE description="Full SPIRE + KMS e2e test using eviden_kms KMIP 2.1 plugins with mTLS (ghcr.io/cosmian/kms:5.26.0)"
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+SPIRE_DIR="${REPO_ROOT}/spire"
+CERTS_DIR="${REPO_ROOT}/test_data/spire/certs"
+GO=$(command -v go)
+SPIRE_SERVER_BIN="${SPIRE_DIR}/bin/spire-server-kmip-e2e"
+CA_KEY_UID="spire-kmip-root-ca-key"
+_TMP_DIR=""
+SPIRE_PID=""
+
+require_cmd() { command -v "$1" >/dev/null 2>&1 || { echo "[ERROR] '$1' not found."; exit 1; }; }
+require_cmd docker; require_cmd go; require_cmd python3; require_cmd openssl
+
+print_header() { echo ""; echo "════════════════════════════════════════════"; echo "  $1"; echo "════════════════════════════════════════════"; }
+print_info()    { echo "[i] $1"; }
+print_success() { echo "[OK] $1"; }
+print_error()   { echo "[ERR] $1" >&2; exit 1; }
+
+cleanup() {
+  set +e
+  [[ -n "${SPIRE_PID}" ]] && kill "${SPIRE_PID}" 2>/dev/null && wait "${SPIRE_PID}" 2>/dev/null || true
+  docker compose -f "${REPO_ROOT}/docker-compose.yml" stop kms-mtls 2>/dev/null || true
+  docker compose -f "${REPO_ROOT}/docker-compose.yml" rm -f kms-mtls 2>/dev/null || true
+  [[ -n "${_TMP_DIR}" ]] && rm -rf "${_TMP_DIR}" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+print_header "SPIRE eviden_kms e2e — mTLS + ghcr.io/cosmian/kms:5.26.0"
+
+# ── 0. Regenerate certs if spire-client.crt is missing ───────────────────────
+if [[ ! -f "${CERTS_DIR}/spire-client.crt" ]]; then
+  print_info "mTLS client cert not found — regenerating all test certs..."
+  bash "${CERTS_DIR}/generate-test-certs.sh"
+fi
+
+# ── 1. Build spire-server from submodule ─────────────────────────────────────
+print_info "Building spire-server from ${SPIRE_DIR}..."
+mkdir -p "${SPIRE_DIR}/bin"
+(cd "${SPIRE_DIR}" && "${GO}" build -o "${SPIRE_SERVER_BIN}" ./cmd/spire-server/)
+print_success "spire-server built: ${SPIRE_SERVER_BIN}"
+
+# ── 2. Start KMS (mTLS) via docker-compose ───────────────────────────────────
+print_info "Pulling KMS image (ghcr.io/cosmian/kms:5.26.0)..."
+docker compose -f "${REPO_ROOT}/docker-compose.yml" pull kms-mtls 2>&1 | tail -2
+
+print_info "Starting KMS with mTLS (service: kms-mtls)..."
+docker compose -f "${REPO_ROOT}/docker-compose.yml" up -d kms-mtls
+
+KMS_PORT=9998
+KMS_URL="https://127.0.0.1:${KMS_PORT}"
+
+print_info "Waiting for KMS at ${KMS_URL}..."
+TRIES=0
+until curl -sf \
+  --cacert "${CERTS_DIR}/ca.crt" \
+  --cert   "${CERTS_DIR}/spire-client.crt" \
+  --key    "${CERTS_DIR}/spire-client.key" \
+  "${KMS_URL}/version" >/dev/null 2>&1; do
+  TRIES=$((TRIES + 1))
+  if [[ "${TRIES}" -ge 60 ]]; then
+    docker compose -f "${REPO_ROOT}/docker-compose.yml" logs kms-mtls | tail -10
+    print_error "KMS (mTLS) did not become ready after 60s"
+  fi
+  sleep 1
+done
+print_success "KMS (mTLS) ready at ${KMS_URL}"
+
+# ── 3. Provision CA key pair + self-signed cert in KMS ───────────────────────
+print_info "Creating root CA key pair and self-signed certificate..."
+CA_EXT_HEX=$(printf '[v3_ca]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,crlSign,digitalSignature\n' \
+  | xxd -p | tr -d '\n' | tr '[:lower:]' '[:upper:]')
+
+CURL_MTLS=(curl -sf \
+  --cacert "${CERTS_DIR}/ca.crt" \
+  --cert   "${CERTS_DIR}/spire-client.crt" \
+  --key    "${CERTS_DIR}/spire-client.key" \
+  -X POST "${KMS_URL}/kmip/2_1" \
+  -H "Content-Type: application/json")
+
+"${CURL_MTLS[@]}" \
+  -d "{\"tag\":\"CreateKeyPair\",\"value\":[{\"tag\":\"CommonAttributes\",\"value\":[{\"tag\":\"CryptographicAlgorithm\",\"type\":\"Enumeration\",\"value\":\"EC\"},{\"tag\":\"CryptographicDomainParameters\",\"value\":[{\"tag\":\"RecommendedCurve\",\"type\":\"Enumeration\",\"value\":\"P384\"}]},{\"tag\":\"KeyFormatType\",\"type\":\"Enumeration\",\"value\":\"ECPrivateKey\"},{\"tag\":\"ActivationDate\",\"type\":\"DateTime\",\"value\":\"2024-01-01T00:00:00Z\"}]},{\"tag\":\"PrivateKeyAttributes\",\"value\":[{\"tag\":\"UniqueIdentifier\",\"type\":\"TextString\",\"value\":\"${CA_KEY_UID}\"},{\"tag\":\"CryptographicUsageMask\",\"type\":\"Integer\",\"value\":1063425}]},{\"tag\":\"PublicKeyAttributes\",\"value\":[{\"tag\":\"CryptographicUsageMask\",\"type\":\"Integer\",\"value\":1051138}]}]}" \
+  >/dev/null
+
+"${CURL_MTLS[@]}" \
+  -d "{\"tag\":\"Certify\",\"value\":[{\"tag\":\"UniqueIdentifier\",\"type\":\"TextString\",\"value\":\"${CA_KEY_UID}_pk\"},{\"tag\":\"Attributes\",\"value\":[{\"tag\":\"CertificateType\",\"type\":\"Enumeration\",\"value\":\"X509\"},{\"tag\":\"CertificateAttributes\",\"value\":[{\"tag\":\"CertificateSubjectCn\",\"type\":\"TextString\",\"value\":\"SPIRE E2E Root CA\"},{\"tag\":\"CertificateSubjectO\",\"type\":\"TextString\",\"value\":\"SPIFFE\"},{\"tag\":\"CertificateSubjectOu\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateSubjectEmail\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateSubjectC\",\"type\":\"TextString\",\"value\":\"US\"},{\"tag\":\"CertificateSubjectSt\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateSubjectL\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateSubjectUid\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateSubjectSerialNumber\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateSubjectTitle\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateSubjectDc\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateSubjectDnQualifier\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateIssuerCn\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateIssuerO\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateIssuerOu\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateIssuerEmail\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateIssuerC\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateIssuerSt\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateIssuerL\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateIssuerUid\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateIssuerSerialNumber\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateIssuerTitle\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateIssuerDc\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateIssuerDnQualifier\",\"type\":\"TextString\",\"value\":\"\"}]},{\"tag\":\"Attribute\",\"value\":[{\"tag\":\"VendorIdentification\",\"type\":\"TextString\",\"value\":\"cosmian\"},{\"tag\":\"AttributeName\",\"type\":\"TextString\",\"value\":\"x509-extension\"},{\"tag\":\"AttributeValue\",\"type\":\"ByteString\",\"value\":\"${CA_EXT_HEX}\"}]}]}]}" \
+  >/dev/null
+
+print_success "CA key pair + self-signed cert provisioned (uid=${CA_KEY_UID})"
+
+# ── 4. Write SPIRE server.conf (mTLS, cert_auth) ─────────────────────────────
+_TMP_DIR=$(mktemp -d /tmp/kmip-go-spire-e2e-XXXXXX)
+mkdir -p "${_TMP_DIR}/data"
+SPIRE_SOCKET="${_TMP_DIR}/api.sock"
+
+cat >"${_TMP_DIR}/server.conf" <<CONF
+server {
+  bind_address = "127.0.0.1"
+  bind_port    = "8081"
+  trust_domain = "kmip-go-e2e.test"
+  data_dir     = "${_TMP_DIR}/data"
+  log_level    = "INFO"
+  socket_path  = "${SPIRE_SOCKET}"
+  ca_ttl               = "1h"
+  default_x509_svid_ttl = "5m"
+  ca_subject {
+    country      = ["US"]
+    organization = ["SPIFFE"]
+    common_name  = ""
+  }
+}
+plugins {
+  DataStore "sql" {
+    plugin_data {
+      database_type     = "sqlite3"
+      connection_string = "${_TMP_DIR}/data/datastore.sqlite3"
+    }
+  }
+  NodeAttestor "join_token" { plugin_data {} }
+
+  # KeyManager: uses mTLS to authenticate to KMS (cert_auth).
+  KeyManager "eviden_kms" {
+    plugin_data {
+      kms_addr     = "${KMS_URL}"
+      ca_cert_path = "${CERTS_DIR}/ca.crt"
+      server_id    = "spire-e2e-server"
+      cert_auth {
+        client_cert_path = "${CERTS_DIR}/spire-client.crt"
+        client_key_path  = "${CERTS_DIR}/spire-client.key"
+      }
+    }
+  }
+
+  # UpstreamAuthority: uses mTLS to authenticate to KMS (cert_auth).
+  UpstreamAuthority "eviden_kms" {
+    plugin_data {
+      kms_addr     = "${KMS_URL}"
+      ca_cert_path = "${CERTS_DIR}/ca.crt"
+      ca_key_uid   = "${CA_KEY_UID}"
+      cert_auth {
+        client_cert_path = "${CERTS_DIR}/spire-client.crt"
+        client_key_path  = "${CERTS_DIR}/spire-client.key"
+      }
+    }
+  }
+}
+health_checks {
+  listener_enabled = true
+  bind_address = "0.0.0.0"
+  bind_port    = "9080"
+  live_path    = "/live"
+  ready_path   = "/ready"
+}
+CONF
+
+# ── 5. Start SPIRE server ─────────────────────────────────────────────────────
+print_info "Starting SPIRE server (eviden_kms + mTLS)..."
+"${SPIRE_SERVER_BIN}" run -config "${_TMP_DIR}/server.conf" >"${_TMP_DIR}/spire.log" 2>&1 &
+SPIRE_PID=$!
+
+TRIES=0
+until [[ -S "${SPIRE_SOCKET}" ]] || [[ "${TRIES}" -ge 60 ]]; do sleep 1; TRIES=$((TRIES+1)); done
+if [[ ! -S "${SPIRE_SOCKET}" ]]; then
+  tail -20 "${_TMP_DIR}/spire.log" || true
+  print_error "SPIRE server did not create its API socket after 60s"
+fi
+
+# ── 6. Healthcheck ────────────────────────────────────────────────────────────
+"${SPIRE_SERVER_BIN}" healthcheck -socketPath "${SPIRE_SOCKET}"
+print_success "SPIRE server is healthy — eviden_kms KeyManager + UpstreamAuthority with mTLS verified."
+
+# ── 7. Verify keys in KMS ─────────────────────────────────────────────────────
+KEY_COUNT=$("${CURL_MTLS[@]}" \
+  -d '{"tag":"Locate","value":[{"tag":"Attributes","value":[{"tag":"ObjectType","type":"Enumeration","value":"PrivateKey"},{"tag":"Attribute","value":[{"tag":"VendorIdentification","type":"TextString","value":"cosmian"},{"tag":"AttributeName","type":"TextString","value":"tag"},{"tag":"AttributeValue","type":"TextString","value":"[\"x-spire-server-id:spire-e2e-server\"]"}]}]}]}' \
+  | python3 -c "import sys,json; v=json.load(sys.stdin)['value']; print(len([x for x in v if x['tag']=='UniqueIdentifier']))")
+
+if [[ "${KEY_COUNT}" -ge 1 ]]; then
+  print_success "Found ${KEY_COUNT} key(s) in KMS for SPIRE server 'spire-e2e-server' — mTLS KeyManager verified."
+else
+  print_error "No keys found in KMS — KeyManager did not store keys."
+fi
+
+print_success "All checks passed. SPIRE eviden_kms plugins working with mTLS + ghcr.io/cosmian/kms:5.26.0"
