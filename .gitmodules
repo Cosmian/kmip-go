@@ -1,0 +1,9 @@
+[submodule "spire"]
+	path = spire
+	url = https://github.com/Manuthor/spire.git
+	branch = feature/eviden-kms-plugins
+
+[submodule "test_data"]
+	path = test_data
+	url = https://github.com/Cosmian/test_data.git
+	branch = spire_sds

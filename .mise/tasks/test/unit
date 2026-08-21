@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+#MISE description="Unit tests: go vet, gofmt check, and go test -race"
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+cd "${REPO_ROOT}"
+
+echo "[i] Running go vet..."
+go vet ./...
+
+echo "[i] Checking gofmt..."
+UNFORMATTED=$(gofmt -l .)
+if [[ -n "${UNFORMATTED}" ]]; then
+  echo "[ERR] The following files are not gofmt-formatted:"
+  echo "${UNFORMATTED}"
+  exit 1
+fi
+
+echo "[i] Running go test -race..."
+go test -count=1 -race ./...
+
+echo "[OK] Unit tests passed."

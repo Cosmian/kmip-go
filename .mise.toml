@@ -1,0 +1,5 @@
+[tools]
+go = "1.26.6"
+
+[env]
+KMIP_GO_ROOT = "{{config_root}}"
