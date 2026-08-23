@@ -371,11 +371,10 @@ type CertifyResponse struct {
 // the KMS needs to identify the issuer certificate to build the chain.
 // x509Extension is an optional OpenSSL-format extension file content (e.g.
 // "[v3_ca]\nbasicConstraints=critical,CA:TRUE,pathlen:0\n"). Pass nil for no extension.
-//
-// Note: the Eviden KMS Certify operation does not accept a standalone validity period
-// on CSR-based requests; the signed certificate TTL is controlled by the KMS server
-// configuration. SPIRE's PreferredTtl hint is acknowledged but not forwarded.
-func (c *Client) Certify(ctx context.Context, csrPEM []byte, caKeyUID, caCertUID string, x509Extension []byte) (*CertifyResponse, error) {
+// ttlDays sets the certificate validity period in days via the
+// "requested_validity_days" Cosmian vendor attribute. Pass 0 to use the
+// KMS server default (typically 365 days).
+func (c *Client) Certify(ctx context.Context, csrPEM []byte, caKeyUID, caCertUID string, x509Extension []byte, ttlDays int) (*CertifyResponse, error) {
 	attrs := []TTLV{
 		Structure("Link",
 			Enumeration("LinkType", "PrivateKeyLink"),
@@ -394,6 +393,16 @@ func (c *Client) Certify(ctx context.Context, csrPEM []byte, caKeyUID, caCertUID
 			TextString("VendorIdentification", VendorIDCosmian),
 			TextString("AttributeName", "x509-extension"),
 			ByteString("AttributeValue", hexEncode(x509Extension)),
+		))
+	}
+	if ttlDays > 0 {
+		// Set the requested validity period as a Cosmian vendor attribute.
+		// The KMS reads this in build_and_sign_certificate and uses it
+		// as the certificate not_after (capped to the issuer's own expiry).
+		attrs = append(attrs, Structure("Attribute",
+			TextString("VendorIdentification", VendorIDCosmian),
+			TextString("AttributeName", "requested_validity_days"),
+			Integer("AttributeValue", ttlDays),
 		))
 	}
 

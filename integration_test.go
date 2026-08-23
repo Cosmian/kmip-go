@@ -204,7 +204,7 @@ func TestLiveCertify(t *testing.T) {
 
 	csrPEM := liveGenerateCSR(t)
 
-	certResp, err := c.Certify(context.Background(), csrPEM, caKP.PrivateKeyUID, caCertUID, nil)
+	certResp, err := c.Certify(context.Background(), csrPEM, caKP.PrivateKeyUID, caCertUID, nil, 0)
 	require.NoError(t, err)
 	require.NotEmpty(t, certResp.CertUID)
 	t.Logf("Signed certificate UID: %s", certResp.CertUID)

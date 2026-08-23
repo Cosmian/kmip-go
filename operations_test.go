@@ -145,12 +145,37 @@ func TestCertify(t *testing.T) {
 
 	// Fake CSR bytes (not validated by FakeKMS).
 	fakePEM := []byte("-----BEGIN CERTIFICATE REQUEST-----\nfake\n-----END CERTIFICATE REQUEST-----\n")
-	resp, err := c.Certify(context.Background(), fakePEM, "ca-key-001", "", nil)
+	resp, err := c.Certify(context.Background(), fakePEM, "ca-key-001", "", nil, 0)
 	if err != nil {
 		t.Fatalf("Certify: %v", err)
 	}
 	if resp.CertUID == "" {
 		t.Fatal("Certify returned empty CertUID")
+	}
+}
+
+// TestCertifyWithTTL verifies that passing ttlDays > 0 to Certify does not
+// cause an error and returns a valid certificate UID.
+//
+// The FakeKMS ignores all attributes and always issues a self-signed cert;
+// the regression test for the actual TTL applied to the certificate lives in
+// the KMS server unit tests
+// (cosmian_kms_server::tests::crl_tests::test_certify_from_csr_with_requested_validity_days).
+func TestCertifyWithTTL(t *testing.T) {
+	f := NewFakeKMS()
+	defer f.Close()
+	c := newTestClient(t, f)
+
+	f.InjectObject("ca-key-002", "PrivateKey", []string{"vault_pki_ca"}, nil, nil)
+
+	fakePEM := []byte("-----BEGIN CERTIFICATE REQUEST-----\nfake\n-----END CERTIFICATE REQUEST-----\n")
+	// Pass a 30-day TTL — the KMS will honour requested_validity_days.
+	resp, err := c.Certify(context.Background(), fakePEM, "ca-key-002", "", nil, 30)
+	if err != nil {
+		t.Fatalf("Certify with ttlDays=30: %v", err)
+	}
+	if resp.CertUID == "" {
+		t.Fatal("Certify with ttlDays=30 returned empty CertUID")
 	}
 }
 
