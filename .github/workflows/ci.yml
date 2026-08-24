@@ -1,0 +1,190 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ── Unit tests: go vet + gofmt + go test -race ────────────────────────────
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: jdx/mise-action@v2
+        with:
+          install: true
+          cache: true
+
+      - name: Run unit tests via mise
+        run: mise run test:unit
+
+  # ── Live integration tests — no-auth HTTP ────────────────────────────────
+  integration:
+    name: Live integration tests (no-auth)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Check out test_data submodule
+        run: |
+          git submodule init test_data
+          git submodule update --depth 1 test_data
+
+      - uses: jdx/mise-action@v2
+        with:
+          install: true
+          cache: true
+
+      - name: Run live integration tests (no-auth)
+        run: mise run test:live
+
+  # ── Live integration tests — mTLS ────────────────────────────────────────
+  integration-mtls:
+    name: Live integration tests (mTLS)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Check out test_data submodule (certs only)
+        run: |
+          git submodule init test_data
+          git submodule update --depth 1 test_data
+
+      - uses: jdx/mise-action@v2
+        with:
+          install: true
+          cache: true
+
+      - name: Install openssl + xxd (needed by generate-test-certs.sh)
+        run: sudo apt-get install -y openssl xxd
+
+      - name: Generate test certificates
+        run: bash test_data/spire/certs/generate-test-certs.sh
+
+      - name: Run live integration tests (mTLS)
+        run: mise run test:live --mtls
+
+  # ── SPIRE e2e — eviden_kms plugins (mTLS) ────────────────────────────────
+  # Requires the spire submodule (feature/eviden-kms-plugins branch pushed to remote).
+  spire-e2e:
+    name: SPIRE eviden_kms e2e (mTLS)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Check out test_data submodule
+        run: |
+          git submodule init test_data
+          git submodule update --depth 1 test_data
+
+      - name: Check out spire submodule
+        run: |
+          git submodule init spire
+          git submodule update --depth 1 spire
+
+      - uses: jdx/mise-action@v2
+        with:
+          install: true
+          cache: true
+
+      - name: Install openssl + xxd
+        run: sudo apt-get install -y openssl xxd
+
+      - name: Generate test certificates
+        run: bash test_data/spire/certs/generate-test-certs.sh
+
+      - name: Run SPIRE e2e test
+        run: mise run test:spire-e2e
+
+  # ── SPIRE full integration — multi-tenant + Mistral clients ──────────────
+  # Requires the spire submodule (feature/eviden-kms-plugins branch pushed to remote).
+  spire:
+    name: SPIRE eviden_kms full integration (multi-tenant)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Check out test_data submodule
+        run: |
+          git submodule init test_data
+          git submodule update --depth 1 test_data
+
+      - name: Check out spire submodule
+        run: |
+          git submodule init spire
+          git submodule update --depth 1 spire
+
+      - uses: jdx/mise-action@v2
+        with:
+          install: true
+          cache: true
+
+      - name: Install openssl + xxd + python3
+        run: sudo apt-get install -y openssl xxd python3 python3-pip
+
+      - name: Generate test certificates
+        run: bash test_data/spire/certs/generate-test-certs.sh
+
+      - name: Run SPIRE full integration test
+        run: mise run test:spire
+
+  # ── SPIRE kind cluster integration (key-manager + upstream-authority) ──────
+  # Validates the kind cluster integration suites that are also run by SPIRE CI.
+  # Builds spire-server:latest-local from the submodule, loads it into kind via
+  # SPIRE's own test framework, and runs the suite scripts end-to-end.
+  kind-integration:
+    name: Kind integration (eviden_kms key-manager + upstream-authority)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Check out spire submodule
+        run: |
+          git submodule init spire
+          git submodule update --depth 1 spire
+
+      - uses: jdx/mise-action@v2
+        with:
+          install: true
+          cache: true
+
+      - name: Build spire-server binary from submodule
+        run: |
+          cd spire
+          go build -o bin/spire-server ./cmd/spire-server/
+
+      - name: Build spire-server:latest-local Docker image
+        run: |
+          docker build -t spire-server:latest-local -f - spire/ <<'DOCKERFILE'
+          FROM ubuntu:24.04
+          RUN apt-get update && apt-get install -y ca-certificates libssl3 && rm -rf /var/lib/apt/lists/*
+          COPY bin/spire-server /opt/spire/bin/spire-server
+          ENTRYPOINT ["/opt/spire/bin/spire-server"]
+          DOCKERFILE
+
+      - name: Pull KMS image (pre-load before kind)
+        run: docker pull ghcr.io/cosmian/kms:5.26.0
+
+      - name: Run kind integration suite — KeyManager
+        run: |
+          cd spire/test/integration
+          ./test.sh suites/key-manager-eviden-kms
+
+      - name: Run kind integration suite — UpstreamAuthority
+        run: |
+          cd spire/test/integration
+          ./test.sh suites/upstream-authority-eviden-kms
