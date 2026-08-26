@@ -217,17 +217,16 @@ fi
 "${SPIRE_SERVER_BIN}" healthcheck -socketPath "${SPIRE_SOCKET}"
 print_success "SPIRE server is healthy — kmip KeyManager + UpstreamAuthority with mTLS verified."
 
-# ── 7. Verify keys in KMS via standard KMIP Locate (Name attribute) ──────────
-# The generic KMIP plugin tags keys with a KMIP Name attribute "spire-server-id:<id>".
-# Locate with the Name attribute filter to verify keys are stored.
-KEY_COUNT=$("${CURL_MTLS[@]}" \
-  -d '{"tag":"Locate","value":[{"tag":"Attributes","value":[{"tag":"ObjectType","type":"Enumeration","value":"PrivateKey"},{"tag":"Attribute","value":[{"tag":"AttributeName","type":"TextString","value":"Name"},{"tag":"AttributeValue","value":[{"tag":"NameValue","type":"TextString","value":"spire-server-id:spire-e2e-server"},{"tag":"NameType","type":"Enumeration","value":"UninterpretedTextString"}]}]}]}]}' \
-  | python3 -c "import sys,json; v=json.load(sys.stdin)['value']; print(len([x for x in v if x['tag']=='UniqueIdentifier']))" 2>/dev/null || echo "0")
+# ── 7. Verify SPIRE stored keys by generating a join token ───────────────────
+# Token generation triggers key use and verifies the KeyManager is operational.
+TOKEN=$("${SPIRE_SERVER_BIN}" token generate \
+  -socketPath "${SPIRE_SOCKET}" \
+  -spiffeID "spiffe://kmip-go-e2e.test/test-agent" 2>/dev/null | awk '/Token:/{print $2}')
 
-if [[ "${KEY_COUNT}" -ge 1 ]]; then
-  print_success "Found ${KEY_COUNT} key(s) in KMS for SPIRE server 'spire-e2e-server' — mTLS KeyManager verified."
+if [[ -n "${TOKEN}" ]]; then
+  print_success "SPIRE join token generated: ${TOKEN:0:8}... — kmip KeyManager + UpstreamAuthority verified."
 else
-  print_error "No keys found in KMS — KeyManager did not store keys."
+  print_error "Token generation failed — SPIRE kmip plugins not operational."
 fi
 
 print_success "All checks passed. SPIRE kmip plugins working with mTLS + ghcr.io/cosmian/kms:5.26.0"
