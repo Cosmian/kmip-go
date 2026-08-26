@@ -1,15 +1,19 @@
-# kmip-go — KMIP 2.1 Go client for Eviden KMS + SPIRE plugins
+# kmip-go — KMIP 2.1 Go client for Eviden KMS + generic KMIP SPIRE plugins
 
 [![Go](https://img.shields.io/badge/Go-1.26-blue)](https://go.dev)
 [![Module](https://img.shields.io/badge/module-github.com%2FCosmian%2Fkmip--go-blue)](https://github.com/Cosmian/kmip-go)
 [![KMS](https://img.shields.io/badge/ghcr.io%2Fcosmian%2Fkms-5.26.0-green)](https://github.com/Cosmian/kms/pkgs/container/kms)
-[![SPIRE PR](https://img.shields.io/badge/SPIRE%20PR-issue%20%237233-orange)](https://github.com/spiffe/spire/issues/7233)
+[![SPIRE issue](https://img.shields.io/badge/SPIRE%20issue%20%237233-proposal-orange)](https://github.com/spiffe/spire/issues/7233)
 
-A minimal, zero-external-dependency **KMIP 2.1 JSON TTLV client** for
-[Eviden KMS](https://github.com/Cosmian/kms), plus **built-in SPIRE plugins**
-(`eviden_kms` KeyManager and UpstreamAuthority) that let SPIRE store its signing
-keys and sign its intermediate CA directly via KMIP 2.1 — no Vault-compatible
-layer, no auth-verifier.
+This repository contains two things:
+
+1. **`github.com/Cosmian/kmip-go`** — a minimal, zero-external-dependency KMIP 2.1 JSON TTLV
+   HTTP client for [Eviden KMS](https://github.com/Cosmian/kms).
+
+2. **`spire/` submodule** — built-in SPIRE plugins for any **KMIP 2.1-compliant server**
+   (binary TTLV over TCP, port 5696).  The plugins use
+   [`ovh/kmip-go`](https://github.com/ovh/kmip-go) as the Go KMIP client library and are
+   tracked in [spiffe/spire#7233](https://github.com/spiffe/spire/issues/7233).
 
 ---
 
@@ -57,7 +61,7 @@ kmip-go/
   .mise/tasks/test/
     live                Docker KMS + go test -tags integration (no-auth or mTLS)
     spire-e2e           Docker KMS + SPIRE server from submodule (mTLS)
-  spire/                Git submodule → spiffe/spire@feature/eviden-kms-plugins
+  spire/                Git submodule → spiffe/spire@feature/kmip-plugins
   test_data/            Git submodule → Cosmian/test_data@spire_sds
   docs/                 mdBook documentation
 ```
@@ -127,7 +131,7 @@ Expected output:
 [OK] spire-server built
 [OK] KMS (mTLS) ready at https://127.0.0.1:9998
 [OK] CA key pair + self-signed cert provisioned
-[OK] SPIRE server is healthy — eviden_kms KeyManager + UpstreamAuthority with mTLS verified.
+[OK] SPIRE server is healthy — kmip KeyManager + UpstreamAuthority with mTLS verified.
 [OK] Found 2 key(s) in KMS for SPIRE server 'spire-e2e-server' — mTLS KeyManager verified.
 [OK] All checks passed.
 ```
@@ -136,21 +140,47 @@ Expected output:
 
 ## SPIRE plugins
 
-The `spire/` submodule contains two built-in SPIRE plugins:
+The `spire/` submodule contains two built-in SPIRE plugins for **any KMIP 2.1-compliant
+server** over the standard binary TTLV / TCP transport (port 5696):
 
 | Plugin | Package | What it does |
 |---|---|---|
-| `KeyManager "eviden_kms"` | `pkg/server/plugin/keymanager/evidenkms` | Creates/signs/recovers SPIRE signing keys in KMS via KMIP |
-| `UpstreamAuthority "eviden_kms"` | `pkg/server/plugin/upstreamauthority/evidenkms` | Signs SPIRE's intermediate CA CSR via KMIP `Certify` |
+| `KeyManager "kmip"` | `pkg/server/plugin/keymanager/kmip` | Creates/signs/recovers SPIRE signing keys via KMIP `CreateKeyPair` + `Sign` |
+| `UpstreamAuthority "kmip"` | `pkg/server/plugin/upstreamauthority/kmip` | Signs SPIRE's intermediate CA CSR via KMIP `Certify` |
 
-Both plugins use this module (`github.com/Cosmian/kmip-go`) and support mTLS
-authentication to the KMS.
+Both plugins use [`ovh/kmip-go`](https://github.com/ovh/kmip-go) (`kmipclient` package)
+as the Go KMIP client library and support mTLS client certificates.
 
-See `test_data/spire/config/spire-server-kmip-a.conf` for a complete SPIRE
-server configuration example with `cert_auth`.
+**Compatible KMIP servers**: Eviden KMS (KMIP 1.x + 2.x), PyKMIP, OpenBao, HashiCorp
+Vault, Thales DPOD, and any other server that implements KMIP 2.1 over TCP/TLS.
 
-A PR to upstream SPIRE is tracked at
-[spiffe/spire#7233](https://github.com/spiffe/spire/issues/7233).
+**Note**: `token_auth` (bearer token) is not supported — use mTLS client certificates.
+
+See [spiffe/spire#7233](https://github.com/spiffe/spire/issues/7233) for the upstream PR.
+
+### Minimal SPIRE server config
+
+```hcl
+KeyManager "kmip" {
+  plugin_data {
+    kmip_addr        = "kmip.example.com:5696"
+    ca_cert_path     = "/etc/spire/kmip-ca.crt"
+    client_cert_path = "/etc/spire/kmip-client.crt"
+    client_key_path  = "/etc/spire/kmip-client.key"
+    server_id        = "spire-server-prod-1"
+  }
+}
+
+UpstreamAuthority "kmip" {
+  plugin_data {
+    kmip_addr        = "kmip.example.com:5696"
+    ca_cert_path     = "/etc/spire/kmip-ca.crt"
+    client_cert_path = "/etc/spire/kmip-client.crt"
+    client_key_path  = "/etc/spire/kmip-client.key"
+    ca_cert_uid      = "root-ca-cert-uid"  # optional
+  }
+}
+```
 
 ---
 
