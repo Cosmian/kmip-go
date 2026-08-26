@@ -284,10 +284,11 @@ plugins {
     }
     UpstreamAuthority "kmip" {
         plugin_data {
-            kmip_addr     = "127.0.0.1:5696"
-            ca_cert_path = "${CERTS_DIR}/ca.crt"
+            kmip_addr        = "127.0.0.1:5696"
+            ca_cert_path     = "${CERTS_DIR}/ca.crt"
             client_cert_path = "${CERTS_DIR}/spire-client.crt"
             client_key_path  = "${CERTS_DIR}/spire-client.key"
+            ca_key_uid       = "${CA_KEY_UID}"
         }
     }
     NodeAttestor "join_token" { plugin_data {} }
