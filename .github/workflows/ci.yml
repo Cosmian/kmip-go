@@ -162,6 +162,9 @@ jobs:
           install: true
           cache: true
 
+      - name: Install openssl (needed by 01-setup-kms TLS cert generation)
+        run: sudo apt-get install -y openssl
+
       - name: Build spire-server binary from submodule
         run: |
           cd spire
