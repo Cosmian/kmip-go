@@ -522,11 +522,11 @@ SID_B="$(tenant_server_id b)"
 # Mirrors test:spire Scenario 11 (cross-AppRole isolation) adapted for KMIP tags.
 print_status "Scenario 1: cross-tenant key isolation (x-spire-server-id tags)"
 LOCATE_A=$("${CURL_MTLS[@]}" -X POST "${KMS_URL}/kmip/2_1" -H "Content-Type: application/json" \
-  -d "{\"tag\":\"Locate\",\"value\":[{\"tag\":\"Attributes\",\"value\":[{\"tag\":\"ObjectType\",\"type\":\"Enumeration\",\"value\":\"PrivateKey\"},{\"tag\":\"Attribute\",\"value\":[{\"tag\":\"AttributeName\",\"type\":\"TextString\",\"value\":\"Name\"},{\"tag\":\"AttributeValue\",\"value\":[{\"tag\":\"NameValue\",\"type\":\"TextString\",\"value\":\"spire-server-id:${SID_A}\"},{\"tag\":\"NameType\",\"type\":\"Enumeration\",\"value\":\"UninterpretedTextString\"}]}]}]}]}" | \
+  -d "{\"tag\":\"Locate\",\"value\":[{\"tag\":\"Attributes\",\"value\":[{\"tag\":\"ObjectType\",\"type\":\"Enumeration\",\"value\":\"PrivateKey\"},{\"tag\":\"Name\",\"type\":\"Structure\",\"value\":[{\"tag\":\"NameValue\",\"type\":\"TextString\",\"value\":\"spire-server-id:${SID_A}\"},{\"tag\":\"NameType\",\"type\":\"Enumeration\",\"value\":\"UninterpretedTextString\"}]}]}]}" | \
   python3 -c "import sys,json; v=json.load(sys.stdin)['value']; print(len([x for x in v if x['tag']=='UniqueIdentifier']))")
 
 LOCATE_B=$("${CURL_MTLS[@]}" -X POST "${KMS_URL}/kmip/2_1" -H "Content-Type: application/json" \
-  -d "{\"tag\":\"Locate\",\"value\":[{\"tag\":\"Attributes\",\"value\":[{\"tag\":\"ObjectType\",\"type\":\"Enumeration\",\"value\":\"PrivateKey\"},{\"tag\":\"Attribute\",\"value\":[{\"tag\":\"AttributeName\",\"type\":\"TextString\",\"value\":\"Name\"},{\"tag\":\"AttributeValue\",\"value\":[{\"tag\":\"NameValue\",\"type\":\"TextString\",\"value\":\"spire-server-id:${SID_B}\"},{\"tag\":\"NameType\",\"type\":\"Enumeration\",\"value\":\"UninterpretedTextString\"}]}]}]}]}" | \
+  -d "{\"tag\":\"Locate\",\"value\":[{\"tag\":\"Attributes\",\"value\":[{\"tag\":\"ObjectType\",\"type\":\"Enumeration\",\"value\":\"PrivateKey\"},{\"tag\":\"Name\",\"type\":\"Structure\",\"value\":[{\"tag\":\"NameValue\",\"type\":\"TextString\",\"value\":\"spire-server-id:${SID_B}\"},{\"tag\":\"NameType\",\"type\":\"Enumeration\",\"value\":\"UninterpretedTextString\"}]}]}]}" | \
   python3 -c "import sys,json; v=json.load(sys.stdin)['value']; print(len([x for x in v if x['tag']=='UniqueIdentifier']))")
 
 if [[ "${LOCATE_A}" -ge 1 && "${LOCATE_B}" -ge 1 ]]; then
@@ -564,7 +564,7 @@ fi
 # ── S_new: Key recovery after SPIRE server restart ───────────────────────────
 print_status "Scenario new: key recovery after SPIRE server-a restart"
 KEYS_BEFORE=$("${CURL_MTLS[@]}" -X POST "${KMS_URL}/kmip/2_1" -H "Content-Type: application/json" \
-  -d "{\"tag\":\"Locate\",\"value\":[{\"tag\":\"Attributes\",\"value\":[{\"tag\":\"ObjectType\",\"type\":\"Enumeration\",\"value\":\"PrivateKey\"},{\"tag\":\"Attribute\",\"value\":[{\"tag\":\"AttributeName\",\"type\":\"TextString\",\"value\":\"Name\"},{\"tag\":\"AttributeValue\",\"value\":[{\"tag\":\"NameValue\",\"type\":\"TextString\",\"value\":\"spire-server-id:${SID_A}\"},{\"tag\":\"NameType\",\"type\":\"Enumeration\",\"value\":\"UninterpretedTextString\"}]}]}]}]}" | \
+  -d "{\"tag\":\"Locate\",\"value\":[{\"tag\":\"Attributes\",\"value\":[{\"tag\":\"ObjectType\",\"type\":\"Enumeration\",\"value\":\"PrivateKey\"},{\"tag\":\"Name\",\"type\":\"Structure\",\"value\":[{\"tag\":\"NameValue\",\"type\":\"TextString\",\"value\":\"spire-server-id:${SID_A}\"},{\"tag\":\"NameType\",\"type\":\"Enumeration\",\"value\":\"UninterpretedTextString\"}]}]}]}" | \
   python3 -c "import sys,json; v=json.load(sys.stdin)['value']; print(len([x for x in v if x['tag']=='UniqueIdentifier']))")
 print_info "Keys before restart: ${KEYS_BEFORE}"
 
@@ -578,7 +578,7 @@ print_info "spire-server-a restarted (PID=${SPIRE_SERVER_PIDS[a]})"
 wait_server_healthy "a"
 
 KEYS_AFTER=$("${CURL_MTLS[@]}" -X POST "${KMS_URL}/kmip/2_1" -H "Content-Type: application/json" \
-  -d "{\"tag\":\"Locate\",\"value\":[{\"tag\":\"Attributes\",\"value\":[{\"tag\":\"ObjectType\",\"type\":\"Enumeration\",\"value\":\"PrivateKey\"},{\"tag\":\"Attribute\",\"value\":[{\"tag\":\"AttributeName\",\"type\":\"TextString\",\"value\":\"Name\"},{\"tag\":\"AttributeValue\",\"value\":[{\"tag\":\"NameValue\",\"type\":\"TextString\",\"value\":\"spire-server-id:${SID_A}\"},{\"tag\":\"NameType\",\"type\":\"Enumeration\",\"value\":\"UninterpretedTextString\"}]}]}]}]}" | \
+  -d "{\"tag\":\"Locate\",\"value\":[{\"tag\":\"Attributes\",\"value\":[{\"tag\":\"ObjectType\",\"type\":\"Enumeration\",\"value\":\"PrivateKey\"},{\"tag\":\"Name\",\"type\":\"Structure\",\"value\":[{\"tag\":\"NameValue\",\"type\":\"TextString\",\"value\":\"spire-server-id:${SID_A}\"},{\"tag\":\"NameType\",\"type\":\"Enumeration\",\"value\":\"UninterpretedTextString\"}]}]}]}" | \
   python3 -c "import sys,json; v=json.load(sys.stdin)['value']; print(len([x for x in v if x['tag']=='UniqueIdentifier']))")
 print_info "Keys after restart: ${KEYS_AFTER}"
 
