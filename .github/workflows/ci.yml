@@ -72,10 +72,10 @@ jobs:
       - name: Run live integration tests (mTLS)
         run: mise run test:live --mtls
 
-  # ── SPIRE e2e — eviden_kms plugins (mTLS) ────────────────────────────────
-  # Requires the spire submodule (feature/eviden-kms-plugins branch pushed to remote).
+  # ── SPIRE e2e — kmip plugins (mTLS) ──────────────────────────────────────
+  # Requires the spire submodule (feature/kmip-plugins branch pushed to remote).
   spire-e2e:
-    name: SPIRE eviden_kms e2e (mTLS)
+    name: SPIRE kmip e2e (mTLS)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -107,9 +107,9 @@ jobs:
         run: mise run test:spire-e2e
 
   # ── SPIRE full integration — multi-tenant + Mistral clients ──────────────
-  # Requires the spire submodule (feature/eviden-kms-plugins branch pushed to remote).
+  # Requires the spire submodule (feature/kmip-plugins branch pushed to remote).
   spire:
-    name: SPIRE eviden_kms full integration (multi-tenant)
+    name: SPIRE kmip full integration (multi-tenant)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -145,7 +145,7 @@ jobs:
   # Builds spire-server:latest-local from the submodule, loads it into kind via
   # SPIRE's own test framework, and runs the suite scripts end-to-end.
   kind-integration:
-    name: Kind integration (eviden_kms key-manager + upstream-authority)
+    name: Kind integration (kmip key-manager + upstream-authority)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -182,9 +182,9 @@ jobs:
       - name: Run kind integration suite — KeyManager
         run: |
           cd spire/test/integration
-          ./test.sh suites/key-manager-eviden-kms
+          ./test.sh suites/key-manager-kmip
 
       - name: Run kind integration suite — UpstreamAuthority
         run: |
           cd spire/test/integration
-          ./test.sh suites/upstream-authority-eviden-kms
+          ./test.sh suites/upstream-authority-kmip

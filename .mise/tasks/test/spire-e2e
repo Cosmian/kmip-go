@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#MISE description="Full SPIRE + KMS e2e test using eviden_kms KMIP 2.1 plugins with mTLS (ghcr.io/cosmian/kms:5.26.0)"
+#MISE description="Full SPIRE + KMS e2e test using kmip KMIP 2.1 plugins with mTLS (ghcr.io/cosmian/kms:5.26.0)"
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -22,13 +22,13 @@ print_error()   { echo "[ERR] $1" >&2; exit 1; }
 cleanup() {
   set +e
   [[ -n "${SPIRE_PID}" ]] && kill "${SPIRE_PID}" 2>/dev/null && wait "${SPIRE_PID}" 2>/dev/null || true
-  docker compose -f "${REPO_ROOT}/docker-compose.yml" stop kms-mtls 2>/dev/null || true
-  docker compose -f "${REPO_ROOT}/docker-compose.yml" rm -f kms-mtls 2>/dev/null || true
+  docker stop kmip-go-kms-socket 2>/dev/null || true
+  docker rm -f kmip-go-kms-socket 2>/dev/null || true
   [[ -n "${_TMP_DIR}" ]] && rm -rf "${_TMP_DIR}" 2>/dev/null || true
 }
 trap cleanup EXIT
 
-print_header "SPIRE eviden_kms e2e — mTLS + ghcr.io/cosmian/kms:5.26.0"
+print_header "SPIRE kmip e2e — mTLS + ghcr.io/cosmian/kms:5.26.0"
 
 # ── 0. Regenerate certs if spire-client.crt is missing ───────────────────────
 if [[ ! -f "${CERTS_DIR}/spire-client.crt" ]]; then
@@ -46,11 +46,49 @@ print_success "spire-server built: ${SPIRE_SERVER_BIN}"
 print_info "Pulling KMS image (ghcr.io/cosmian/kms:5.26.0)..."
 docker compose -f "${REPO_ROOT}/docker-compose.yml" pull kms-mtls 2>&1 | tail -2
 
-print_info "Starting KMS with mTLS (service: kms-mtls)..."
-docker compose -f "${REPO_ROOT}/docker-compose.yml" up -d kms-mtls
+print_info "Generating KMS config with HTTPS + binary KMIP TCP socket server..."
+_TMP_DIR=$(mktemp -d /tmp/kmip-go-spire-e2e-XXXXXX)
+mkdir -p "${_TMP_DIR}/data"
+
+cat >"${_TMP_DIR}/kms.toml" <<TOML
+default_username = "admin"
+
+[db]
+database_type  = "sqlite"
+sqlite_path    = "/tmp/kms-kmip-test"
+clear_database = true
+
+[http]
+hostname = "0.0.0.0"
+port     = 9998
+
+[tls]
+tls_cert_file        = "/etc/kms/certs/kms.crt"
+tls_key_file         = "/etc/kms/certs/kms.key"
+clients_ca_cert_file = "/etc/kms/certs/ca.crt"
+
+[socket_server]
+socket_server_start    = true
+socket_server_port     = 5696
+socket_server_hostname = "0.0.0.0"
+
+[logging]
+rust_log    = "warn,cosmian_kms_server=info"
+ansi_colors = false
+TOML
+
+print_info "Starting KMS with mTLS HTTPS (port 9998) + binary KMIP TCP (port 5696)..."
+docker run -d --name kmip-go-kms-socket \
+  -p 9998:9998 -p 5696:5696 \
+  -v "${CERTS_DIR}/kms.crt:/etc/kms/certs/kms.crt:ro" \
+  -v "${CERTS_DIR}/kms.key:/etc/kms/certs/kms.key:ro" \
+  -v "${CERTS_DIR}/ca.crt:/etc/kms/certs/ca.crt:ro" \
+  -v "${_TMP_DIR}/kms.toml:/etc/kms/kms.toml:ro" \
+  ghcr.io/cosmian/kms:5.26.0 --config /etc/kms/kms.toml
 
 KMS_PORT=9998
 KMS_URL="https://127.0.0.1:${KMS_PORT}"
+KMIP_ADDR="127.0.0.1:5696"
 
 print_info "Waiting for KMS at ${KMS_URL}..."
 TRIES=0
@@ -61,12 +99,25 @@ until curl -sf \
   "${KMS_URL}/version" >/dev/null 2>&1; do
   TRIES=$((TRIES + 1))
   if [[ "${TRIES}" -ge 60 ]]; then
-    docker compose -f "${REPO_ROOT}/docker-compose.yml" logs kms-mtls | tail -10
+    docker logs kmip-go-kms-socket 2>&1 | tail -10
     print_error "KMS (mTLS) did not become ready after 60s"
   fi
   sleep 1
 done
 print_success "KMS (mTLS) ready at ${KMS_URL}"
+
+# Wait for binary KMIP TCP socket on port 5696.
+print_info "Waiting for binary KMIP TCP socket at ${KMIP_ADDR}..."
+TRIES=0
+until nc -z 127.0.0.1 5696 2>/dev/null; do
+  TRIES=$((TRIES + 1))
+  if [[ "${TRIES}" -ge 30 ]]; then
+    docker logs kmip-go-kms-socket 2>&1 | tail -10
+    print_error "KMS binary KMIP TCP socket did not open after 30s"
+  fi
+  sleep 1
+done
+print_success "Binary KMIP TCP socket ready at ${KMIP_ADDR}"
 
 # ── 3. Provision CA key pair + self-signed cert in KMS ───────────────────────
 print_info "Creating root CA key pair and self-signed certificate..."
@@ -90,9 +141,7 @@ CURL_MTLS=(curl -sf \
 
 print_success "CA key pair + self-signed cert provisioned (uid=${CA_KEY_UID})"
 
-# ── 4. Write SPIRE server.conf (mTLS, cert_auth) ─────────────────────────────
-_TMP_DIR=$(mktemp -d /tmp/kmip-go-spire-e2e-XXXXXX)
-mkdir -p "${_TMP_DIR}/data"
+# ── 4. Write SPIRE server.conf (binary KMIP TCP, flat mTLS config) ───────────
 SPIRE_SOCKET="${_TMP_DIR}/api.sock"
 
 cat >"${_TMP_DIR}/server.conf" <<CONF
@@ -120,29 +169,25 @@ plugins {
   }
   NodeAttestor "join_token" { plugin_data {} }
 
-  # KeyManager: uses mTLS to authenticate to KMS (cert_auth).
-  KeyManager "eviden_kms" {
+  # KeyManager: connects to KMS binary KMIP TCP socket (ovh/kmip-go, standard KMIP).
+  KeyManager "kmip" {
     plugin_data {
-      kms_addr     = "${KMS_URL}"
-      ca_cert_path = "${CERTS_DIR}/ca.crt"
-      server_id    = "spire-e2e-server"
-      cert_auth {
-        client_cert_path = "${CERTS_DIR}/spire-client.crt"
-        client_key_path  = "${CERTS_DIR}/spire-client.key"
-      }
+      kmip_addr        = "${KMIP_ADDR}"
+      ca_cert_path     = "${CERTS_DIR}/ca.crt"
+      client_cert_path = "${CERTS_DIR}/spire-client.crt"
+      client_key_path  = "${CERTS_DIR}/spire-client.key"
+      server_id        = "spire-e2e-server"
     }
   }
 
-  # UpstreamAuthority: uses mTLS to authenticate to KMS (cert_auth).
-  UpstreamAuthority "eviden_kms" {
+  # UpstreamAuthority: connects to KMS binary KMIP TCP socket.
+  # The KMS uses its configured root CA key to sign CSRs via Certify.
+  UpstreamAuthority "kmip" {
     plugin_data {
-      kms_addr     = "${KMS_URL}"
-      ca_cert_path = "${CERTS_DIR}/ca.crt"
-      ca_key_uid   = "${CA_KEY_UID}"
-      cert_auth {
-        client_cert_path = "${CERTS_DIR}/spire-client.crt"
-        client_key_path  = "${CERTS_DIR}/spire-client.key"
-      }
+      kmip_addr        = "${KMIP_ADDR}"
+      ca_cert_path     = "${CERTS_DIR}/ca.crt"
+      client_cert_path = "${CERTS_DIR}/spire-client.crt"
+      client_key_path  = "${CERTS_DIR}/spire-client.key"
     }
   }
 }
@@ -156,7 +201,7 @@ health_checks {
 CONF
 
 # ── 5. Start SPIRE server ─────────────────────────────────────────────────────
-print_info "Starting SPIRE server (eviden_kms + mTLS)..."
+print_info "Starting SPIRE server (kmip + mTLS)..."
 "${SPIRE_SERVER_BIN}" run -config "${_TMP_DIR}/server.conf" >"${_TMP_DIR}/spire.log" 2>&1 &
 SPIRE_PID=$!
 
@@ -169,12 +214,14 @@ fi
 
 # ── 6. Healthcheck ────────────────────────────────────────────────────────────
 "${SPIRE_SERVER_BIN}" healthcheck -socketPath "${SPIRE_SOCKET}"
-print_success "SPIRE server is healthy — eviden_kms KeyManager + UpstreamAuthority with mTLS verified."
+print_success "SPIRE server is healthy — kmip KeyManager + UpstreamAuthority with mTLS verified."
 
-# ── 7. Verify keys in KMS ─────────────────────────────────────────────────────
+# ── 7. Verify keys in KMS via standard KMIP Locate (Name attribute) ──────────
+# The generic KMIP plugin tags keys with a KMIP Name attribute "spire-server-id:<id>".
+# Locate with the Name attribute filter to verify keys are stored.
 KEY_COUNT=$("${CURL_MTLS[@]}" \
-  -d '{"tag":"Locate","value":[{"tag":"Attributes","value":[{"tag":"ObjectType","type":"Enumeration","value":"PrivateKey"},{"tag":"Attribute","value":[{"tag":"VendorIdentification","type":"TextString","value":"cosmian"},{"tag":"AttributeName","type":"TextString","value":"tag"},{"tag":"AttributeValue","type":"TextString","value":"[\"x-spire-server-id:spire-e2e-server\"]"}]}]}]}' \
-  | python3 -c "import sys,json; v=json.load(sys.stdin)['value']; print(len([x for x in v if x['tag']=='UniqueIdentifier']))")
+  -d '{"tag":"Locate","value":[{"tag":"Attributes","value":[{"tag":"ObjectType","type":"Enumeration","value":"PrivateKey"},{"tag":"Attribute","value":[{"tag":"AttributeName","type":"TextString","value":"Name"},{"tag":"AttributeValue","value":[{"tag":"NameValue","type":"TextString","value":"spire-server-id:spire-e2e-server"},{"tag":"NameType","type":"Enumeration","value":"UninterpretedTextString"}]}]}]}]}' \
+  | python3 -c "import sys,json; v=json.load(sys.stdin)['value']; print(len([x for x in v if x['tag']=='UniqueIdentifier']))" 2>/dev/null || echo "0")
 
 if [[ "${KEY_COUNT}" -ge 1 ]]; then
   print_success "Found ${KEY_COUNT} key(s) in KMS for SPIRE server 'spire-e2e-server' — mTLS KeyManager verified."
@@ -182,4 +229,4 @@ else
   print_error "No keys found in KMS — KeyManager did not store keys."
 fi
 
-print_success "All checks passed. SPIRE eviden_kms plugins working with mTLS + ghcr.io/cosmian/kms:5.26.0"
+print_success "All checks passed. SPIRE kmip plugins working with mTLS + ghcr.io/cosmian/kms:5.26.0"

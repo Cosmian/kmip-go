@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#MISE description="SPIRE + Mistral client full integration tests — eviden_kms KMIP 2.1 plugins (replaces KMS repo test:spire)"
+#MISE description="SPIRE + Mistral client full integration tests — kmip KMIP 2.1 plugins (replaces KMS repo test:spire)"
 #USAGE flag "-t --tag <tag>" env="KMS_IMAGE_TAG" help="cosmian/kms Docker image tag" default="5.26.0"
 set -euo pipefail
 
@@ -86,14 +86,15 @@ reset_state() {
     docker compose -f "${_TMP_DIR}/dc.yml" --profile spire-kmip down \
       --volumes --remove-orphans 2>/dev/null || true
   fi
-  docker compose -f "${REPO_ROOT}/docker-compose.yml" down --remove-orphans 2>/dev/null || true
+  docker stop kmip-go-kms-spire 2>/dev/null || true; docker rm -f kmip-go-kms-spire 2>/dev/null || true
+  [[ -n "${_KMS_TMP_DIR:-}" ]] && rm -rf "${_KMS_TMP_DIR}" 2>/dev/null || true
 
   rm -rf /tmp/spire-server-* /tmp/spire-agent-config-* 2>/dev/null || true
   rm -f  /tmp/spire-server-*.log 2>/dev/null || true
 }
 
 cleanup() {
-  print_info "Cleaning up SPIRE eviden_kms integration test resources…"
+  print_info "Cleaning up SPIRE kmip integration test resources…"
   for t in "${TENANTS[@]}"; do
     local log="/tmp/spire-server-${t}.log"
     [[ -f "${log}" ]] && { echo "--- SPIRE SERVER '${t}' LOGS (last 30 lines) ---"; tail -30 "${log}" || true; }
@@ -118,7 +119,7 @@ fi
 print_status "Resetting state from any previous run…"
 reset_state
 
-print_header "SPIRE + Mistral Client — eviden_kms native KMIP 2.1 plugins"
+print_header "SPIRE + Mistral Client — kmip native KMIP 2.1 plugins"
 
 # ── Step 1: TLS certificates ──────────────────────────────────────────────────
 print_status "Step 1: TLS certificates"
@@ -130,16 +131,49 @@ else
 fi
 
 # ── Step 2: Build spire-server from submodule ─────────────────────────────────
-print_status "Step 2: Build spire-server (feature/eviden-kms-plugins)"
+print_status "Step 2: Build spire-server (feature/kmip-plugins)"
 mkdir -p "${SPIRE_DIR}/bin"
 (cd "${SPIRE_DIR}" && "${GO}" build -o "${SPIRE_SERVER_BIN}" ./cmd/spire-server/) || \
   print_error "Failed to build spire-server. Is the submodule checked out?"
 print_success "spire-server built: ${SPIRE_SERVER_BIN}"
 
-# ── Step 3: Start KMS (mTLS) via docker-compose ───────────────────────────────
-print_status "Step 3: Start KMS with mTLS (ghcr.io/cosmian/kms:${KMS_IMAGE_TAG:-5.26.0})"
-docker compose -f "${REPO_ROOT}/docker-compose.yml" pull kms-mtls 2>&1 | tail -2
-docker compose -f "${REPO_ROOT}/docker-compose.yml" up -d kms-mtls
+# ── Step 3: Start KMS (mTLS HTTPS + binary KMIP TCP socket) ───────────────────
+print_status "Step 3: Start KMS with mTLS + socket server (ghcr.io/cosmian/kms:${KMS_IMAGE_TAG:-5.26.0})"
+# Write a temp KMS config with socket server enabled.
+_KMS_TMP_DIR=$(mktemp -d /tmp/spire-kms-XXXXXX)
+cat >"${_KMS_TMP_DIR}/kms.toml" <<TOML
+default_username = "admin"
+
+[db]
+database_type  = "sqlite"
+sqlite_path    = "/tmp/kms"
+clear_database = true
+
+[http]
+hostname = "0.0.0.0"
+port     = 9998
+
+[tls]
+tls_cert_file        = "/etc/kms/certs/kms.crt"
+tls_key_file         = "/etc/kms/certs/kms.key"
+clients_ca_cert_file = "/etc/kms/certs/ca.crt"
+
+[socket_server]
+socket_server_start    = true
+socket_server_port     = 5696
+socket_server_hostname = "0.0.0.0"
+
+[logging]
+rust_log    = "warn"
+ansi_colors = false
+TOML
+docker run -d --name kmip-go-kms-spire \
+  -p 9998:9998 -p 5696:5696 \
+  -v "${CERTS_DIR}/kms.crt:/etc/kms/certs/kms.crt:ro" \
+  -v "${CERTS_DIR}/kms.key:/etc/kms/certs/kms.key:ro" \
+  -v "${CERTS_DIR}/ca.crt:/etc/kms/certs/ca.crt:ro" \
+  -v "${_KMS_TMP_DIR}/kms.toml:/etc/kms/kms.toml:ro" \
+  "ghcr.io/cosmian/kms:${KMS_IMAGE_TAG:-5.26.0}" --config /etc/kms/kms.toml
 
 KMS_URL="https://127.0.0.1:9998"
 CURL_MTLS=(curl -sf \
@@ -156,10 +190,16 @@ print_info "Waiting for KMS (mTLS) at ${KMS_URL}…"
 TRIES=0
 until "${CURL_MTLS[@]}" "${KMS_URL}/version" >/dev/null 2>&1; do
   TRIES=$((TRIES + 1))
-  [[ "${TRIES}" -ge 60 ]] && { docker compose -f "${REPO_ROOT}/docker-compose.yml" logs kms-mtls | tail -10; print_error "KMS did not start in 60s"; }
+  [[ "${TRIES}" -ge 60 ]] && { docker logs kmip-go-kms-spire 2>&1 | tail -10; print_error "KMS did not start in 60s"; }
   sleep 1
 done
 print_success "KMS (mTLS) ready at ${KMS_URL}"
+TRIES=0
+until nc -z 127.0.0.1 5696 2>/dev/null; do
+  TRIES=$((TRIES + 1)); [[ "${TRIES}" -ge 30 ]] && print_error "KMS binary KMIP TCP did not open"
+  sleep 1
+done
+print_success "Binary KMIP TCP socket ready at 127.0.0.1:5696"
 
 # ── Step 4: Provision root CA key pair + self-signed cert ─────────────────────
 print_status "Step 4: Provision root CA key pair + self-signed certificate"
@@ -204,8 +244,8 @@ fi
 
 print_success "KMIP API conformance pre-flight passed."
 
-# ── Step 6: Write eviden_kms SPIRE server configs ─────────────────────────────
-print_status "Step 6: Write eviden_kms SPIRE server configs for both tenants"
+# ── Step 6: Write kmip SPIRE server configs ─────────────────────────────
+print_status "Step 6: Write kmip SPIRE server configs for both tenants"
 _TMP_DIR=$(mktemp -d /tmp/spire-kmip-full-XXXXXX)
 
 for t in "${TENANTS[@]}"; do
@@ -233,26 +273,21 @@ server {
     default_x509_svid_ttl = "1h"
 }
 plugins {
-    KeyManager "eviden_kms" {
+    KeyManager "kmip" {
         plugin_data {
-            kms_addr     = "https://127.0.0.1:9998"
+            kmip_addr     = "127.0.0.1:5696"
             ca_cert_path = "${CERTS_DIR}/ca.crt"
             server_id    = "${sid}"
-            cert_auth {
-                client_cert_path = "${CERTS_DIR}/spire-client.crt"
-                client_key_path  = "${CERTS_DIR}/spire-client.key"
-            }
+            client_cert_path = "${CERTS_DIR}/spire-client.crt"
+            client_key_path  = "${CERTS_DIR}/spire-client.key"
         }
     }
-    UpstreamAuthority "eviden_kms" {
+    UpstreamAuthority "kmip" {
         plugin_data {
-            kms_addr     = "https://127.0.0.1:9998"
+            kmip_addr     = "127.0.0.1:5696"
             ca_cert_path = "${CERTS_DIR}/ca.crt"
-            ca_key_uid   = "${CA_KEY_UID}"
-            cert_auth {
-                client_cert_path = "${CERTS_DIR}/spire-client.crt"
-                client_key_path  = "${CERTS_DIR}/spire-client.key"
-            }
+            client_cert_path = "${CERTS_DIR}/spire-client.crt"
+            client_key_path  = "${CERTS_DIR}/spire-client.key"
         }
     }
     NodeAttestor "join_token" { plugin_data {} }
@@ -275,7 +310,7 @@ SPIRE_CONF
 done
 
 # ── Step 7: Start SPIRE servers (host processes) ──────────────────────────────
-print_status "Step 7: Start ${#TENANTS[@]} SPIRE servers (eviden_kms + mTLS)"
+print_status "Step 7: Start ${#TENANTS[@]} SPIRE servers (kmip + mTLS)"
 for t in "${TENANTS[@]}"; do
   "${SPIRE_SERVER_BIN}" run -config "${_TMP_DIR}/spire-server-${t}.conf" \
     > "/tmp/spire-server-${t}.log" 2>&1 &
@@ -286,7 +321,7 @@ done
 for t in "${TENANTS[@]}"; do
   print_info "Waiting for spire-server-${t} to become healthy…"
   wait_server_healthy "${t}"
-  print_success "SPIRE server '${t}' healthy (eviden_kms plugins active)."
+  print_success "SPIRE server '${t}' healthy (kmip plugins active)."
 done
 
 # ── Step 8: Generate join tokens + start SPIRE agents (Docker) ───────────────
@@ -450,7 +485,7 @@ for t in "${TENANTS[@]}"; do
     agent="mistral-agent-${t}${n}"
     print_info "Running ${agent} SPIFFE identity test…"
     ${DC} --profile spire-kmip run --rm "${agent}"
-    print_success "${agent} passed — SPIFFE identity verified via eviden_kms KeyManager."
+    print_success "${agent} passed — SPIFFE identity verified via kmip KeyManager."
   done
 done
 
@@ -486,11 +521,11 @@ SID_B="$(tenant_server_id b)"
 # Mirrors test:spire Scenario 11 (cross-AppRole isolation) adapted for KMIP tags.
 print_status "Scenario 1: cross-tenant key isolation (x-spire-server-id tags)"
 LOCATE_A=$("${CURL_MTLS[@]}" -X POST "${KMS_URL}/kmip/2_1" -H "Content-Type: application/json" \
-  -d "{\"tag\":\"Locate\",\"value\":[{\"tag\":\"Attributes\",\"value\":[{\"tag\":\"ObjectType\",\"type\":\"Enumeration\",\"value\":\"PrivateKey\"},{\"tag\":\"Attribute\",\"value\":[{\"tag\":\"VendorIdentification\",\"type\":\"TextString\",\"value\":\"cosmian\"},{\"tag\":\"AttributeName\",\"type\":\"TextString\",\"value\":\"tag\"},{\"tag\":\"AttributeValue\",\"type\":\"TextString\",\"value\":\"[\\\"x-spire-server-id:${SID_A}\\\"]\"}]}]}]}" | \
+  -d "{\"tag\":\"Locate\",\"value\":[{\"tag\":\"Attributes\",\"value\":[{\"tag\":\"ObjectType\",\"type\":\"Enumeration\",\"value\":\"PrivateKey\"},{\"tag\":\"Attribute\",\"value\":[{\"tag\":\"AttributeName\",\"type\":\"TextString\",\"value\":\"Name\"},{\"tag\":\"AttributeValue\",\"value\":[{\"tag\":\"NameValue\",\"type\":\"TextString\",\"value\":\"spire-server-id:${SID_A}\"},{\"tag\":\"NameType\",\"type\":\"Enumeration\",\"value\":\"UninterpretedTextString\"}]}]}]}]}" | \
   python3 -c "import sys,json; v=json.load(sys.stdin)['value']; print(len([x for x in v if x['tag']=='UniqueIdentifier']))")
 
 LOCATE_B=$("${CURL_MTLS[@]}" -X POST "${KMS_URL}/kmip/2_1" -H "Content-Type: application/json" \
-  -d "{\"tag\":\"Locate\",\"value\":[{\"tag\":\"Attributes\",\"value\":[{\"tag\":\"ObjectType\",\"type\":\"Enumeration\",\"value\":\"PrivateKey\"},{\"tag\":\"Attribute\",\"value\":[{\"tag\":\"VendorIdentification\",\"type\":\"TextString\",\"value\":\"cosmian\"},{\"tag\":\"AttributeName\",\"type\":\"TextString\",\"value\":\"tag\"},{\"tag\":\"AttributeValue\",\"type\":\"TextString\",\"value\":\"[\\\"x-spire-server-id:${SID_B}\\\"]\"}]}]}]}" | \
+  -d "{\"tag\":\"Locate\",\"value\":[{\"tag\":\"Attributes\",\"value\":[{\"tag\":\"ObjectType\",\"type\":\"Enumeration\",\"value\":\"PrivateKey\"},{\"tag\":\"Attribute\",\"value\":[{\"tag\":\"AttributeName\",\"type\":\"TextString\",\"value\":\"Name\"},{\"tag\":\"AttributeValue\",\"value\":[{\"tag\":\"NameValue\",\"type\":\"TextString\",\"value\":\"spire-server-id:${SID_B}\"},{\"tag\":\"NameType\",\"type\":\"Enumeration\",\"value\":\"UninterpretedTextString\"}]}]}]}]}" | \
   python3 -c "import sys,json; v=json.load(sys.stdin)['value']; print(len([x for x in v if x['tag']=='UniqueIdentifier']))")
 
 if [[ "${LOCATE_A}" -ge 1 && "${LOCATE_B}" -ge 1 ]]; then
@@ -526,7 +561,7 @@ fi
 # ── S_new: Key recovery after SPIRE server restart ───────────────────────────
 print_status "Scenario new: key recovery after SPIRE server-a restart"
 KEYS_BEFORE=$("${CURL_MTLS[@]}" -X POST "${KMS_URL}/kmip/2_1" -H "Content-Type: application/json" \
-  -d "{\"tag\":\"Locate\",\"value\":[{\"tag\":\"Attributes\",\"value\":[{\"tag\":\"ObjectType\",\"type\":\"Enumeration\",\"value\":\"PrivateKey\"},{\"tag\":\"Attribute\",\"value\":[{\"tag\":\"VendorIdentification\",\"type\":\"TextString\",\"value\":\"cosmian\"},{\"tag\":\"AttributeName\",\"type\":\"TextString\",\"value\":\"tag\"},{\"tag\":\"AttributeValue\",\"type\":\"TextString\",\"value\":\"[\\\"x-spire-server-id:${SID_A}\\\"]\"}]}]}]}" | \
+  -d "{\"tag\":\"Locate\",\"value\":[{\"tag\":\"Attributes\",\"value\":[{\"tag\":\"ObjectType\",\"type\":\"Enumeration\",\"value\":\"PrivateKey\"},{\"tag\":\"Attribute\",\"value\":[{\"tag\":\"AttributeName\",\"type\":\"TextString\",\"value\":\"Name\"},{\"tag\":\"AttributeValue\",\"value\":[{\"tag\":\"NameValue\",\"type\":\"TextString\",\"value\":\"spire-server-id:${SID_A}\"},{\"tag\":\"NameType\",\"type\":\"Enumeration\",\"value\":\"UninterpretedTextString\"}]}]}]}]}" | \
   python3 -c "import sys,json; v=json.load(sys.stdin)['value']; print(len([x for x in v if x['tag']=='UniqueIdentifier']))")
 print_info "Keys before restart: ${KEYS_BEFORE}"
 
@@ -540,7 +575,7 @@ print_info "spire-server-a restarted (PID=${SPIRE_SERVER_PIDS[a]})"
 wait_server_healthy "a"
 
 KEYS_AFTER=$("${CURL_MTLS[@]}" -X POST "${KMS_URL}/kmip/2_1" -H "Content-Type: application/json" \
-  -d "{\"tag\":\"Locate\",\"value\":[{\"tag\":\"Attributes\",\"value\":[{\"tag\":\"ObjectType\",\"type\":\"Enumeration\",\"value\":\"PrivateKey\"},{\"tag\":\"Attribute\",\"value\":[{\"tag\":\"VendorIdentification\",\"type\":\"TextString\",\"value\":\"cosmian\"},{\"tag\":\"AttributeName\",\"type\":\"TextString\",\"value\":\"tag\"},{\"tag\":\"AttributeValue\",\"type\":\"TextString\",\"value\":\"[\\\"x-spire-server-id:${SID_A}\\\"]\"}]}]}]}" | \
+  -d "{\"tag\":\"Locate\",\"value\":[{\"tag\":\"Attributes\",\"value\":[{\"tag\":\"ObjectType\",\"type\":\"Enumeration\",\"value\":\"PrivateKey\"},{\"tag\":\"Attribute\",\"value\":[{\"tag\":\"AttributeName\",\"type\":\"TextString\",\"value\":\"Name\"},{\"tag\":\"AttributeValue\",\"value\":[{\"tag\":\"NameValue\",\"type\":\"TextString\",\"value\":\"spire-server-id:${SID_A}\"},{\"tag\":\"NameType\",\"type\":\"Enumeration\",\"value\":\"UninterpretedTextString\"}]}]}]}]}" | \
   python3 -c "import sys,json; v=json.load(sys.stdin)['value']; print(len([x for x in v if x['tag']=='UniqueIdentifier']))")
 print_info "Keys after restart: ${KEYS_AFTER}"
 
@@ -553,7 +588,7 @@ fi
 # ── S2-equiv: KMS outage → clean error + recovery ─────────────────────────────
 # Mirrors test:spire Scenario 2 (auth-verifier outage → 502).
 print_status "Scenario 2-equiv: KMS outage → KMIP connection error + recovery"
-docker compose -f "${REPO_ROOT}/docker-compose.yml" stop kms-mtls 2>/dev/null || true
+docker stop kmip-go-kms-spire 2>/dev/null || true
 sleep 2
 S2_CODE=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 3 \
   --cacert "${CERTS_DIR}/ca.crt" \
@@ -568,8 +603,7 @@ else
 fi
 
 # Restart KMS and confirm recovery
-docker compose -f "${REPO_ROOT}/docker-compose.yml" start kms-mtls 2>/dev/null || \
-  docker compose -f "${REPO_ROOT}/docker-compose.yml" up -d kms-mtls
+docker start kmip-go-kms-spire 2>/dev/null || docker run -d --name kmip-go-kms-spire -p 9998:9998 -p 5696:5696 -v "${CERTS_DIR}/kms.crt:/etc/kms/certs/kms.crt:ro" -v "${CERTS_DIR}/kms.key:/etc/kms/certs/kms.key:ro" -v "${CERTS_DIR}/ca.crt:/etc/kms/certs/ca.crt:ro" -v "${_KMS_TMP_DIR}/kms.toml:/etc/kms/kms.toml:ro" "ghcr.io/cosmian/kms:${KMS_IMAGE_TAG:-5.26.0}" --config /etc/kms/kms.toml
 TRIES=0
 until "${CURL_MTLS[@]}" "${KMS_URL}/version" >/dev/null 2>&1; do
   TRIES=$((TRIES+1)); [[ "${TRIES}" -ge 30 ]] && print_error "KMS did not recover in 30s."; sleep 1
@@ -590,5 +624,5 @@ else
   print_warning "Step 17: SDS delivery test FAILED (exit ${SDS_EXIT}). Run mise run test:spire-sds to investigate."
 fi
 
-print_header "All SPIRE eviden_kms integration tests passed"
+print_header "All SPIRE kmip integration tests passed"
 print_success "Native KMIP 2.1 plugins are a verified multi-tenant Vault+auth-verifier replacement."
