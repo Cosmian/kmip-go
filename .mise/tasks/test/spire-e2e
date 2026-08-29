@@ -160,7 +160,6 @@ plugins {
     }
   }
 
-  }
 }
 health_checks {
   listener_enabled = true
