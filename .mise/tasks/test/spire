@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#MISE description="SPIRE + Mistral client full integration tests — kmip KMIP 2.1 plugins (replaces KMS repo test:spire)"
+#MISE description="SPIRE + Mistral client full integration tests — kmip KeyManager plugin (replaces KMS repo test:spire)"
 #USAGE flag "-t --tag <tag>" env="KMS_IMAGE_TAG" help="cosmian/kms Docker image tag" default="5.26.0"
 set -euo pipefail
 
@@ -10,7 +10,6 @@ SPIRE_DIR="${REPO_ROOT}/spire"
 CERTS_DIR="${TEST_DATA}/certs"
 GO=$(command -v go)
 SPIRE_SERVER_BIN="${SPIRE_DIR}/bin/spire-server-kmip-e2e"
-CA_KEY_UID="spire-kmip-root-ca-key"
 
 # ── Multi-tenant topology (bit-to-bit with KMS repo test:spire) ───────────────
 # Two INDEPENDENT SPIRE deployments (tenants "a" and "b") run against the SAME
@@ -201,18 +200,6 @@ until nc -z 127.0.0.1 5696 2>/dev/null; do
 done
 print_success "Binary KMIP TCP socket ready at 127.0.0.1:5696"
 
-# ── Step 4: Provision root CA key pair + self-signed cert ─────────────────────
-print_status "Step 4: Provision root CA key pair + self-signed certificate"
-CA_EXT_HEX=$(printf '[v3_ca]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,crlSign,digitalSignature\n' \
-  | xxd -p | tr -d '\n' | tr '[:lower:]' '[:upper:]')
-
-"${CURL_MTLS[@]}" -X POST "${KMS_URL}/kmip/2_1" -H "Content-Type: application/json" \
-  -d "{\"tag\":\"CreateKeyPair\",\"value\":[{\"tag\":\"CommonAttributes\",\"value\":[{\"tag\":\"CryptographicAlgorithm\",\"type\":\"Enumeration\",\"value\":\"EC\"},{\"tag\":\"CryptographicDomainParameters\",\"value\":[{\"tag\":\"RecommendedCurve\",\"type\":\"Enumeration\",\"value\":\"P384\"}]},{\"tag\":\"KeyFormatType\",\"type\":\"Enumeration\",\"value\":\"ECPrivateKey\"},{\"tag\":\"ActivationDate\",\"type\":\"DateTime\",\"value\":\"2024-01-01T00:00:00Z\"}]},{\"tag\":\"PrivateKeyAttributes\",\"value\":[{\"tag\":\"UniqueIdentifier\",\"type\":\"TextString\",\"value\":\"${CA_KEY_UID}\"},{\"tag\":\"CryptographicUsageMask\",\"type\":\"Integer\",\"value\":1063425}]},{\"tag\":\"PublicKeyAttributes\",\"value\":[{\"tag\":\"CryptographicUsageMask\",\"type\":\"Integer\",\"value\":1051138}]}]}" >/dev/null
-
-"${CURL_MTLS[@]}" -X POST "${KMS_URL}/kmip/2_1" -H "Content-Type: application/json" \
-  -d "{\"tag\":\"Certify\",\"value\":[{\"tag\":\"UniqueIdentifier\",\"type\":\"TextString\",\"value\":\"${CA_KEY_UID}_pk\"},{\"tag\":\"Attributes\",\"value\":[{\"tag\":\"CertificateType\",\"type\":\"Enumeration\",\"value\":\"X509\"},{\"tag\":\"CertificateAttributes\",\"value\":[{\"tag\":\"CertificateSubjectCn\",\"type\":\"TextString\",\"value\":\"SPIRE KMIP Root CA\"},{\"tag\":\"CertificateSubjectO\",\"type\":\"TextString\",\"value\":\"SPIFFE\"},{\"tag\":\"CertificateSubjectOu\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateSubjectEmail\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateSubjectC\",\"type\":\"TextString\",\"value\":\"US\"},{\"tag\":\"CertificateSubjectSt\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateSubjectL\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateSubjectUid\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateSubjectSerialNumber\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateSubjectTitle\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateSubjectDc\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateSubjectDnQualifier\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateIssuerCn\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateIssuerO\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateIssuerOu\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateIssuerEmail\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateIssuerC\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateIssuerSt\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateIssuerL\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateIssuerUid\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateIssuerSerialNumber\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateIssuerTitle\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateIssuerDc\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateIssuerDnQualifier\",\"type\":\"TextString\",\"value\":\"\"}]},{\"tag\":\"Attribute\",\"value\":[{\"tag\":\"VendorIdentification\",\"type\":\"TextString\",\"value\":\"cosmian\"},{\"tag\":\"AttributeName\",\"type\":\"TextString\",\"value\":\"x509-extension\"},{\"tag\":\"AttributeValue\",\"type\":\"ByteString\",\"value\":\"${CA_EXT_HEX}\"}]}]}]}" >/dev/null
-
-print_success "Root CA key (uid=${CA_KEY_UID}) and self-signed cert provisioned."
 
 # ── Step 5: Pre-flight — KMIP API conformance (replaces Vault API conformance) ─
 print_status "Step 5: KMIP API conformance pre-flight"
@@ -230,16 +217,6 @@ if [[ -n "${PRE_UID}" ]]; then
     -d "{\"tag\":\"Destroy\",\"value\":[{\"tag\":\"UniqueIdentifier\",\"type\":\"TextString\",\"value\":\"${PRE_UID}\"}]}" >/dev/null
 else
   print_error "KMIP pre-flight failed: CreateKeyPair returned no UID. Check KMS logs."
-fi
-
-# 5b: Certify with CA key works
-PRE_CERT=$("${CURL_MTLS[@]}" -X POST "${KMS_URL}/kmip/2_1" -H "Content-Type: application/json" \
-  -d "{\"tag\":\"GetAttributes\",\"value\":[{\"tag\":\"UniqueIdentifier\",\"type\":\"TextString\",\"value\":\"${CA_KEY_UID}\"},{\"tag\":\"AttributeName\",\"type\":\"TextString\",\"value\":\"Link\"}]}" | \
-  python3 -c "import sys,json; v=json.load(sys.stdin); print('ok')")
-if [[ "${PRE_CERT}" == "ok" ]]; then
-  print_success "5b: KMIP GetAttributes on CA key → OK"
-else
-  print_error "KMIP pre-flight 5b failed: CA key not accessible."
 fi
 
 print_success "KMIP API conformance pre-flight passed."
@@ -280,15 +257,6 @@ plugins {
             server_id    = "${sid}"
             client_cert_path = "${CERTS_DIR}/spire-client.crt"
             client_key_path  = "${CERTS_DIR}/spire-client.key"
-        }
-    }
-    UpstreamAuthority "kmip" {
-        plugin_data {
-            kmip_addr        = "127.0.0.1:5696"
-            ca_cert_path     = "${CERTS_DIR}/ca.crt"
-            client_cert_path = "${CERTS_DIR}/spire-client.crt"
-            client_key_path  = "${CERTS_DIR}/spire-client.key"
-            ca_key_uid       = "${CA_KEY_UID}"
         }
     }
     NodeAttestor "join_token" { plugin_data {} }
@@ -556,9 +524,9 @@ S10_CODE=$("${CURL_MTLS_NOCHECK[@]}" -o /dev/null -w "%{http_code}" -X POST "${K
   -H "Content-Type: application/json" \
   -d '{"tag":"GetAttributes","value":[{"tag":"UniqueIdentifier","type":"TextString","value":"nonexistent-ca-key-uid-99999"},{"tag":"AttributeName","type":"TextString","value":"Link"}]}')
 if [[ "${S10_CODE}" =~ ^4[0-9][0-9]$ ]]; then
-  print_success "Scenario 10: non-existent CA key UID returns HTTP ${S10_CODE} — UpstreamAuthority fails fast."
+  print_success "Scenario 10: non-existent key UID returns HTTP ${S10_CODE} — KMS fails fast."
 else
-  print_error "Scenario 10: expected 4xx for non-existent CA key UID, got ${S10_CODE}."
+  print_error "Scenario 10: expected 4xx for non-existent key UID, got ${S10_CODE}."
 fi
 
 # ── S_new: Key recovery after SPIRE server restart ───────────────────────────

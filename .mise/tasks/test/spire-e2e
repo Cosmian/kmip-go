@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#MISE description="Full SPIRE + KMS e2e test using kmip KMIP 2.1 plugins with mTLS (ghcr.io/cosmian/kms:5.26.0)"
+#MISE description="Full SPIRE + KMS e2e test using kmip KeyManager plugin with mTLS (ghcr.io/cosmian/kms:5.26.0)"
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -7,7 +7,6 @@ SPIRE_DIR="${REPO_ROOT}/spire"
 CERTS_DIR="${REPO_ROOT}/test_data/spire/certs"
 GO=$(command -v go)
 SPIRE_SERVER_BIN="${SPIRE_DIR}/bin/spire-server-kmip-e2e"
-CA_KEY_UID="spire-kmip-root-ca-key"
 _TMP_DIR=""
 SPIRE_PID=""
 
@@ -119,29 +118,10 @@ until nc -z 127.0.0.1 5696 2>/dev/null; do
 done
 print_success "Binary KMIP TCP socket ready at ${KMIP_ADDR}"
 
-# ── 3. Provision CA key pair + self-signed cert in KMS ───────────────────────
-print_info "Creating root CA key pair and self-signed certificate..."
-CA_EXT_HEX=$(printf '[v3_ca]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,crlSign,digitalSignature\n' \
-  | xxd -p | tr -d '\n' | tr '[:lower:]' '[:upper:]')
+# ── 3. Write SPIRE server.conf (binary KMIP TCP, flat mTLS config) ───────────
 
-CURL_MTLS=(curl -sf \
-  --cacert "${CERTS_DIR}/ca.crt" \
-  --cert   "${CERTS_DIR}/spire-client.crt" \
-  --key    "${CERTS_DIR}/spire-client.key" \
-  -X POST "${KMS_URL}/kmip/2_1" \
-  -H "Content-Type: application/json")
 
-"${CURL_MTLS[@]}" \
-  -d "{\"tag\":\"CreateKeyPair\",\"value\":[{\"tag\":\"CommonAttributes\",\"value\":[{\"tag\":\"CryptographicAlgorithm\",\"type\":\"Enumeration\",\"value\":\"EC\"},{\"tag\":\"CryptographicDomainParameters\",\"value\":[{\"tag\":\"RecommendedCurve\",\"type\":\"Enumeration\",\"value\":\"P384\"}]},{\"tag\":\"KeyFormatType\",\"type\":\"Enumeration\",\"value\":\"ECPrivateKey\"},{\"tag\":\"ActivationDate\",\"type\":\"DateTime\",\"value\":\"2024-01-01T00:00:00Z\"}]},{\"tag\":\"PrivateKeyAttributes\",\"value\":[{\"tag\":\"UniqueIdentifier\",\"type\":\"TextString\",\"value\":\"${CA_KEY_UID}\"},{\"tag\":\"CryptographicUsageMask\",\"type\":\"Integer\",\"value\":1063425}]},{\"tag\":\"PublicKeyAttributes\",\"value\":[{\"tag\":\"CryptographicUsageMask\",\"type\":\"Integer\",\"value\":1051138}]}]}" \
-  >/dev/null
 
-"${CURL_MTLS[@]}" \
-  -d "{\"tag\":\"Certify\",\"value\":[{\"tag\":\"UniqueIdentifier\",\"type\":\"TextString\",\"value\":\"${CA_KEY_UID}_pk\"},{\"tag\":\"Attributes\",\"value\":[{\"tag\":\"CertificateType\",\"type\":\"Enumeration\",\"value\":\"X509\"},{\"tag\":\"CertificateAttributes\",\"value\":[{\"tag\":\"CertificateSubjectCn\",\"type\":\"TextString\",\"value\":\"SPIRE E2E Root CA\"},{\"tag\":\"CertificateSubjectO\",\"type\":\"TextString\",\"value\":\"SPIFFE\"},{\"tag\":\"CertificateSubjectOu\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateSubjectEmail\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateSubjectC\",\"type\":\"TextString\",\"value\":\"US\"},{\"tag\":\"CertificateSubjectSt\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateSubjectL\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateSubjectUid\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateSubjectSerialNumber\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateSubjectTitle\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateSubjectDc\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateSubjectDnQualifier\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateIssuerCn\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateIssuerO\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateIssuerOu\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateIssuerEmail\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateIssuerC\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateIssuerSt\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateIssuerL\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateIssuerUid\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateIssuerSerialNumber\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateIssuerTitle\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateIssuerDc\",\"type\":\"TextString\",\"value\":\"\"},{\"tag\":\"CertificateIssuerDnQualifier\",\"type\":\"TextString\",\"value\":\"\"}]},{\"tag\":\"Attribute\",\"value\":[{\"tag\":\"VendorIdentification\",\"type\":\"TextString\",\"value\":\"cosmian\"},{\"tag\":\"AttributeName\",\"type\":\"TextString\",\"value\":\"x509-extension\"},{\"tag\":\"AttributeValue\",\"type\":\"ByteString\",\"value\":\"${CA_EXT_HEX}\"}]}]}]}" \
-  >/dev/null
-
-print_success "CA key pair + self-signed cert provisioned (uid=${CA_KEY_UID})"
-
-# ── 4. Write SPIRE server.conf (binary KMIP TCP, flat mTLS config) ───────────
 SPIRE_SOCKET="${_TMP_DIR}/api.sock"
 
 cat >"${_TMP_DIR}/server.conf" <<CONF
@@ -180,16 +160,6 @@ plugins {
     }
   }
 
-  # UpstreamAuthority: connects to KMS binary KMIP TCP socket.
-  # ca_key_uid is the UID of the root CA private key used to sign CSRs via Certify.
-  UpstreamAuthority "kmip" {
-    plugin_data {
-      kmip_addr        = "${KMIP_ADDR}"
-      ca_cert_path     = "${CERTS_DIR}/ca.crt"
-      client_cert_path = "${CERTS_DIR}/spire-client.crt"
-      client_key_path  = "${CERTS_DIR}/spire-client.key"
-      ca_key_uid       = "${CA_KEY_UID}"
-    }
   }
 }
 health_checks {
@@ -215,7 +185,7 @@ fi
 
 # ── 6. Healthcheck ────────────────────────────────────────────────────────────
 "${SPIRE_SERVER_BIN}" healthcheck -socketPath "${SPIRE_SOCKET}"
-print_success "SPIRE server is healthy — kmip KeyManager + UpstreamAuthority with mTLS verified."
+print_success "SPIRE server is healthy — kmip KeyManager with mTLS verified."
 
 # ── 7. Verify SPIRE stored keys by generating a join token ───────────────────
 # Token generation triggers key use and verifies the KeyManager is operational.
@@ -224,9 +194,9 @@ TOKEN=$("${SPIRE_SERVER_BIN}" token generate \
   -spiffeID "spiffe://kmip-go-e2e.test/test-agent" 2>/dev/null | awk '/Token:/{print $2}')
 
 if [[ -n "${TOKEN}" ]]; then
-  print_success "SPIRE join token generated: ${TOKEN:0:8}... — kmip KeyManager + UpstreamAuthority verified."
+  print_success "SPIRE join token generated: ${TOKEN:0:8}... — kmip KeyManager verified."
 else
-  print_error "Token generation failed — SPIRE kmip plugins not operational."
+  print_error "Token generation failed — SPIRE kmip KeyManager not operational."
 fi
 
-print_success "All checks passed. SPIRE kmip plugins working with mTLS + ghcr.io/cosmian/kms:5.26.0"
+print_success "All checks passed. SPIRE kmip KeyManager working with mTLS + ghcr.io/cosmian/kms:5.26.0"
