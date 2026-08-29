@@ -5,7 +5,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 GO=$(command -v go)
-CERTS_DIR="${REPO_ROOT}/test_data/spire/certs"
+CERTS_DIR="${REPO_ROOT}/testdata/certs"
 
 require_cmd() { command -v "$1" >/dev/null 2>&1 || { echo "[ERROR] '$1' not found. $2"; exit 1; }; }
 require_cmd docker "Install Docker Desktop."
@@ -49,8 +49,8 @@ print_info "Waiting for KMS at ${KMS_URL}..."
 TRIES=0
 until curl -sf \
   ${USE_MTLS:+--cacert "${CERTS_DIR}/ca.crt"} \
-  ${USE_MTLS:+--cert "${CERTS_DIR}/spire-client.crt"} \
-  ${USE_MTLS:+--key  "${CERTS_DIR}/spire-client.key"} \
+  ${USE_MTLS:+--cert "${CERTS_DIR}/client.crt"} \
+  ${USE_MTLS:+--key  "${CERTS_DIR}/client.key"} \
   "${KMS_URL}/version" >/dev/null 2>&1; do
   TRIES=$((TRIES + 1))
   if [[ "${TRIES}" -ge 60 ]]; then
@@ -68,8 +68,8 @@ print_info "Running Go integration tests..."
   if [[ "${USE_MTLS}" == "true" ]]; then
     KMS_TEST_ADDR="${KMS_URL}" \
     KMS_CA_CERT="${CERTS_DIR}/ca.crt" \
-    KMS_CLIENT_CERT="${CERTS_DIR}/spire-client.crt" \
-    KMS_CLIENT_KEY="${CERTS_DIR}/spire-client.key" \
+    KMS_CLIENT_CERT="${CERTS_DIR}/client.crt" \
+    KMS_CLIENT_KEY="${CERTS_DIR}/client.key" \
       "${GO}" test -v -count=1 -tags integration ./... 2>&1
   else
     KMS_TEST_ADDR="${KMS_URL}" \

@@ -18,9 +18,9 @@
 //
 // Or manually with mTLS:
 //   KMS_TEST_ADDR=https://127.0.0.1:9998 \
-//   KMS_CA_CERT=test_data/spire/certs/ca.crt \
-//   KMS_CLIENT_CERT=test_data/spire/certs/spire-client.crt \
-//   KMS_CLIENT_KEY=test_data/spire/certs/spire-client.key \
+//   KMS_CA_CERT=testdata/certs/ca.crt \
+//   KMS_CLIENT_CERT=testdata/certs/client.crt \
+//   KMS_CLIENT_KEY=testdata/certs/client.key \
 //     go test -v -count=1 -tags integration ./...
 
 package kmip

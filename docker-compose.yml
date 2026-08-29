@@ -1,7 +1,6 @@
 # docker-compose.yml — centralized image version management for kmip-go tests
 #
-# All service images are pinned to explicit versions. Update versions here only;
-# mise tasks reference this file via `docker compose` commands.
+# All service images are pinned to explicit versions.
 #
 # Services:
 #   kms        — no-auth HTTP (for quick unit-level integration tests)
@@ -15,8 +14,6 @@
 services:
 
   # ── Eviden KMS — no-auth HTTP ─────────────────────────────────────────────
-  # Simple configuration for fast iteration. No TLS, no client cert required.
-  # Source: https://github.com/Cosmian/kms/pkgs/container/kms
   kms:
     image: ghcr.io/cosmian/kms:5.26.0
     container_name: kmip-go-kms
@@ -27,9 +24,8 @@ services:
     restart: "no"
 
   # ── Eviden KMS — mTLS HTTPS ───────────────────────────────────────────────
-  # Production-like configuration: TLS server cert + mutual TLS client cert
-  # verification. SPIRE and the Go KMIP client must present spire-client.crt.
-  # Certs are mounted read-only from test_data/spire/certs/.
+  # Mutual TLS: every client must present a certificate signed by testdata/certs/ca.crt.
+  # Regenerate certs when needed: bash scripts/generate-test-certs.sh
   kms-mtls:
     image: ghcr.io/cosmian/kms:5.26.0
     container_name: kmip-go-kms-mtls
@@ -38,13 +34,10 @@ services:
     ports:
       - "9998:9998"
     volumes:
-      # KMS server cert + key (presented to all HTTPS clients)
-      - ./test_data/spire/certs/kms.crt:/etc/kms/certs/kms.crt:ro
-      - ./test_data/spire/certs/kms.key:/etc/kms/certs/kms.key:ro
-      # CA cert used to verify client certificates (enforces mTLS)
-      - ./test_data/spire/certs/ca.crt:/etc/kms/certs/ca.crt:ro
-      # KMS TOML config enabling TLS + clients_ca_cert_file
-      - ./test_data/spire/config/kms-kmip.toml:/etc/kms/kms.toml:ro
+      - ./testdata/certs/kms.crt:/etc/kms/certs/kms.crt:ro
+      - ./testdata/certs/kms.key:/etc/kms/certs/kms.key:ro
+      - ./testdata/certs/ca.crt:/etc/kms/certs/ca.crt:ro
+      - ./testdata/kms-mtls.toml:/etc/kms/kms.toml:ro
     command: ["--config", "/etc/kms/kms.toml"]
     restart: "no"
 

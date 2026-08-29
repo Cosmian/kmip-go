@@ -1,0 +1,27 @@
+# kms-mtls.toml — KMS configuration for the kmip-go mTLS integration tests.
+#
+# Exposes HTTPS on port 9998 with mutual TLS:
+# the client must present a certificate signed by the test CA (ca.crt).
+#
+# Start via docker-compose.yml:
+#   docker compose up -d kms-mtls
+
+default_username = "admin"
+
+[db]
+database_type  = "sqlite"
+sqlite_path    = "/tmp/kms-kmip-test"
+clear_database = true
+
+[http]
+hostname = "0.0.0.0"
+port     = 9998
+
+[tls]
+tls_cert_file        = "/etc/kms/certs/kms.crt"
+tls_key_file         = "/etc/kms/certs/kms.key"
+clients_ca_cert_file = "/etc/kms/certs/ca.crt"
+
+[logging]
+rust_log    = "warn,cosmian_kms_server=info"
+ansi_colors = false
